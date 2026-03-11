@@ -872,11 +872,24 @@ async function fetchAllData() {
 
     // Phase 1 — collect raw tracks
     allPlaylists = [];
+    const skippedPlaylists = [];
     for (let i = 0; i < pls.length; i++) {
       const pl = pls[i];
       setStatus(`Loading playlist ${i+1}/${pls.length}: "${pl.name}"...`, 12 + Math.round(((i+1)/pls.length)*36));
-      const tracks = await fetchPlaylistTracks(pl.id);
-      allPlaylists.push({ info:pl, tracks });
+      try {
+        const tracks = await fetchPlaylistTracks(pl.id);
+        allPlaylists.push({ info:pl, tracks });
+      } catch(e) {
+        if (e.message.includes('403')) {
+          skippedPlaylists.push(pl.name);
+          console.warn('Skipped playlist (403):', pl.name);
+        } else {
+          throw e; // re-throw non-403 errors
+        }
+      }
+    }
+    if (skippedPlaylists.length) {
+      console.warn('Skipped playlists due to permissions:', skippedPlaylists);
     }
 
     // Phase 2 — batch Spotify artist genres
@@ -932,37 +945,62 @@ async function fetchAllData() {
 }
 
 async function fetchPlaylistTracks(pid) {
+  // Use a simpler fields query — some field combinations trigger 403 on certain playlist types
   const raw = await getAllPages(
-    `https://api.spotify.com/v1/playlists/${pid}/tracks?limit=100&fields=next,items(added_at,is_local,track(id,name,explicit,duration_ms,external_urls,is_playable,restrictions,artists(id,name),album(id,name,release_date,images),disc_number,track_number))`
+    `https://api.spotify.com/v1/playlists/${pid}/tracks?limit=50&market=from_token`
   );
   const tracks = [];
   for (const item of raw) {
     if (!item) continue;
-    const t = item.track, isLocal = item.is_local;
+    const t = item.track;
+    const isLocal = item.is_local || false;
     if (!t && !isLocal) continue;
-    let status = 'Active';
-    if (isLocal) status = 'Local File';
-    else if (!t) status = 'Unavailable';
-    else if (t.restrictions && t.restrictions.reason) status = 'Restricted';
-    else if (t.is_playable === false) status = 'Unavailable';
-    if (!t) { tracks.push({ status, addedAt:item.added_at, isLocal }); continue; }
 
-    const artistIds = (t.artists||[]).map(a=>a.id).filter(Boolean);
-    const artists   = (t.artists||[]).map(a=>a.name).join(', ');
-    const albumArt  = t.album && t.album.images && t.album.images.length ? t.album.images[t.album.images.length-1].url : null;
-    const spotifyUrl = t.external_urls && t.external_urls.spotify ? t.external_urls.spotify : null;
-    const ytUrl = `https://music.youtube.com/search?q=${encodeURIComponent((t.name||'')+' '+artists)}`;
+    let status = 'Active';
+    if (isLocal) {
+      status = 'Local File';
+    } else if (!t) {
+      status = 'Unavailable';
+    } else if (t.restrictions && t.restrictions.reason) {
+      // Map restriction reason to readable status
+      const reasonMap = { market: 'Region Restricted', product: 'Premium Required', explicit: 'Explicit Filtered' };
+      status = reasonMap[t.restrictions.reason] || 'Restricted';
+    } else if (t.is_playable === false) {
+      status = 'Unavailable';
+    }
+
+    if (!t) { tracks.push({ status, addedAt: item.added_at, isLocal, name:'Unknown Track', artists:'—', album:'—', releaseDate:'—', genre:'—', genreSource:'none', genreList:[], artistIds:[] }); continue; }
+
+    const artistIds     = (t.artists||[]).map(a=>a.id).filter(Boolean);
+    const primaryArtist = t.artists && t.artists[0] ? t.artists[0].name : '';
+    const artists       = (t.artists||[]).map(a=>a.name).join(', ') || '—';
+    const album         = t.album || {};
+    const images        = album.images || [];
+    const albumArt      = images.length ? images[images.length-1].url : null;
+    const spotifyUrl    = t.external_urls && t.external_urls.spotify ? t.external_urls.spotify : null;
+    const ytUrl         = `https://music.youtube.com/search?q=${encodeURIComponent((t.name||'')+' '+artists)}`;
 
     tracks.push({
-      status, addedAt: item.added_at, isLocal,
-      id: t.id, name: t.name||'—',
-      artists, primaryArtist: t.artists && t.artists[0] ? t.artists[0].name : '', artistIds,
-      album: t.album ? t.album.name : '—',
-      releaseDate: t.album ? t.album.release_date : '—',
-      genre:'—', genreSource:'none', genreList:[],
-      explicit: t.explicit, durationMs: t.duration_ms,
-      albumArt, spotifyUrl, youtubeUrl: ytUrl,
-      trackNumber: t.track_number, discNumber: t.disc_number
+      status,
+      addedAt:      item.added_at || '',
+      isLocal,
+      id:           t.id || '',
+      name:         t.name || '—',
+      artists,
+      primaryArtist,
+      artistIds,
+      album:        album.name || '—',
+      releaseDate:  album.release_date || '—',
+      genre:        '—',
+      genreSource:  'none',
+      genreList:    [],
+      explicit:     t.explicit || false,
+      durationMs:   t.duration_ms || 0,
+      albumArt,
+      spotifyUrl,
+      youtubeUrl:   ytUrl,
+      trackNumber:  t.track_number || '',
+      discNumber:   t.disc_number  || ''
     });
   }
   return tracks;
@@ -986,6 +1024,19 @@ function renderMainPanel(user) {
   const h=Math.floor(ms/3600000), m=Math.floor((ms%3600000)/60000);
   document.getElementById('stat-duration').textContent    = h+'h '+m+'m';
   document.getElementById('header-actions').style.display = 'flex';
+
+  // Show skipped playlists warning if any were blocked by 403
+  const existingWarn = document.getElementById('skipped-warn');
+  if (existingWarn) existingWarn.remove();
+  if (typeof skippedPlaylists !== 'undefined' && skippedPlaylists.length) {
+    const notice = document.createElement('div');
+    notice.id = 'skipped-warn';
+    notice.className = 'notice warn fade-in';
+    notice.innerHTML = '<span class="notice-icon">⚠️</span><span><strong style="color:var(--text)">' + skippedPlaylists.length + ' playlist(s) skipped</strong> — Spotify blocked access (403): <em>' + skippedPlaylists.join(', ') + '</em>. These are usually playlists you follow but don\'t own.</span>';
+    const mainPanel = document.getElementById('main-panel');
+    mainPanel.insertBefore(notice, mainPanel.children[1]);
+  }
+
   renderTabs();
   showPanel('main');
 }
