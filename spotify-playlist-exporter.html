@@ -363,6 +363,18 @@
         <span>⚡</span> Connect to Spotify
       </button>
       <div id="error-msg"></div>
+
+      <div id="help-403" style="display:none;margin-top:16px;background:rgba(255,170,0,0.06);border:1px solid rgba(255,170,0,0.25);border-radius:10px;padding:16px 18px;text-align:left;">
+        <div style="font-size:11px;font-weight:700;color:var(--amber);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.08em;">⚠ How to fix a 403 error</div>
+        <div style="font-size:11px;color:var(--muted);line-height:1.8;">
+          <b style="color:var(--text)">Option 1 — Check Development Mode</b><br>
+          Go to <a href="https://developer.spotify.com/dashboard" target="_blank" style="color:var(--green)">Spotify Dashboard</a> → your app → Settings. If you see a <b style="color:var(--text)">"Development Mode"</b> notice, your app is restricted to certain endpoints. Click <b style="color:var(--text)">Request Extension</b> and fill in the short form (select Personal/Hobby, explain it's for personal playlist backup).<br><br>
+          <b style="color:var(--text)">Option 2 — Reconnect with fresh permissions</b><br>
+          Click Connect below — sometimes a fresh OAuth grant resolves scope issues.<br><br>
+          <b style="color:var(--text)">Option 3 — Use Exportify instead</b><br>
+          Go to <a href="https://exportify.app" target="_blank" style="color:var(--green)">exportify.app</a>, export all your playlists as CSVs, then upload them to Claude to generate the Excel file — no API needed.
+        </div>
+      </div>
     </div>
   </div>
 
@@ -665,7 +677,18 @@ async function spFetch(url) {
     if (!ok) throw new Error('Session expired. Please reconnect.');
     r = await fetch(url, { headers:{ 'Authorization':'Bearer '+accessToken } });
   }
-  if (!r.ok) throw new Error('Spotify '+r.status);
+  if (r.status === 403) {
+    let body = {};
+    try { body = await r.json(); } catch(e) {}
+    const reason = body.error && body.error.message ? body.error.message : 'Access denied';
+    throw new Error('Spotify returned 403 (Forbidden) on: ' + url.split('?')[0] + '\n\nReason: ' + reason + '\n\nThis usually means your Spotify app is in Development Mode with restricted endpoints, or a required scope is missing. See the instructions below.');
+  }
+  if (!r.ok) {
+    let body = {};
+    try { body = await r.json(); } catch(e) {}
+    const reason = body.error && body.error.message ? body.error.message : '';
+    throw new Error('Spotify ' + r.status + (reason ? ': ' + reason : '') + ' — URL: ' + url.split('?')[0]);
+  }
   return r.json();
 }
 
@@ -898,8 +921,13 @@ async function fetchAllData() {
   } catch(err) {
     console.error(err);
     showPanel('setup');
-    showError('Error: ' + err.message + '. Token may have expired — reconnect.');
+    showError(err.message + '\n\n' +
+      'If you see a 403 error:\n' +
+      '1. In Spotify Dashboard → your app → check it is not in Development Mode\n' +
+      '2. If it says Development Mode, click "Request Extension" and apply\n' +
+      '3. Or try disconnecting and reconnecting — your token may just need a fresh scope grant');
     localStorage.removeItem('sp_token');
+    localStorage.removeItem('sp_refresh_token');
   }
 }
 
@@ -1092,6 +1120,9 @@ function setStatus(msg, pct) {
 function showError(msg) {
   const el = document.getElementById('error-msg');
   el.textContent = msg; el.style.display = 'block';
+  // Show 403 help panel if relevant
+  const help = document.getElementById('help-403');
+  if (help) help.style.display = msg.includes('403') ? 'block' : 'none';
 }
 
 // ═══════════════════════════════════════════════════════
